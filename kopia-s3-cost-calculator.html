@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Kopia AWS S3 成本计算器（us-east）</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; margin: 16px; color: #111; }
+    .container { display: flex; gap: 24px; align-items: flex-start; }
+    .panel { background: #fff; border: 1px solid #e6e6e6; padding: 16px; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.03); }
+    .panel.wide { flex: 1; min-width: 620px; }
+    .panel.narrow { width: 360px; }
+    label { display: block; margin-top: 8px; font-size: 13px; color: #333; }
+    input[type="number"], select, input[type="text"] { width: 100%; padding: 8px; margin-top: 6px; box-sizing: border-box; border: 1px solid #ddd; border-radius: 4px; }
+    .row { display:flex; gap:8px; }
+    .row > * { flex: 1; }
+    button { padding: 8px 12px; margin-top: 10px; border-radius: 6px; border: none; background: #0366d6; color: #fff; cursor: pointer; }
+    button.secondary { background: #6c757d; }
+    .small { font-size: 13px; color: #666; margin-left: 6px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid #f0f0f0; }
+    .muted { color: #666; font-size: 13px; }
+    .total { font-weight: 700; font-size: 18px; }
+    .preset { background: #f6f8fa; border: 1px solid #e1e4e8; color: #0366d6; padding: 6px 8px; margin-right: 6px; cursor: pointer; border-radius: 6px; }
+    .price-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .note { font-size: 13px; color: #444; margin-top: 8px; }
+    footer { margin-top: 18px; color: #666; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>Kopia AWS S3 成本计算器（us-east）</h1>
+  <p class="muted">说明：使用十进制单位（1 TB = 10^12 bytes）。所有默认价格取 us-east 区域“最高一档”。价格可在右侧面板修改并保存到本地浏览器。</p>
+
+  <div class="container">
+    <div class="panel wide">
+      <h2>输入参数</h2>
+
+      <label>总数据量</label>
+      <div class="row">
+        <input id="totalValue" type="number" min="0" step="any" value="1" />
+        <select id="totalUnit">
+          <option value="TB">TB</option>
+          <option value="GB">GB</option>
+        </select>
+      </div>
+      <div class="row">
+        <div>
+          <label>分片大小（可变，默认 25 MB）</label>
+          <input id="chunkSizeMB" type="number" min="1" step="any" value="25" />
+          <div class="small">单位：MB（可修改）</div>
+        </div>
+        <div>
+          <label>S3 Standard 在库天数（自动 = 转入天数 + 1，不可修改）</label>
+          <input id="standardDaysDerived" type="number" disabled value="31" />
+          <div class="small">等于“从上传起多少天后转入 Deep Archive” + 1（只读）</div>
+        </div>
+      </div>
+
+      <label><input id="lifecycleEnable" type="checkbox" checked /> 启用生命周期转换到 Glacier Deep Archive</label>
+
+      <div class="row">
+        <div>
+          <label>从上传起多少天后转入 Deep Archive</label>
+          <input id="lifecycleDaysAfter" type="number" min="0" step="1" value="30" />
+        </div>
+        <div>
+          <label>Deep Archive 保留天数（如小于 180 将按 180 计费）</label>
+          <input id="deepArchiveDays" type="number" min="0" step="1" value="180" />
+        </div>
+      </div>
+
+      <h3>恢复 / 下载</h3>
+      <div class="row">
+        <div>
+          <label>恢复类型</label>
+          <select id="restoreType">
+            <option value="standard">标准恢复（≈12 小时）</option>
+            <option value="bulk">批量恢复（≈48 小时）</option>
+          </select>
+        </div>
+        <div>
+          <label>恢复次数</label>
+          <input id="restoreCount" type="number" min="0" step="1" value="1" />
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label>恢复数据量</label>
+          <input id="restoreValue" type="number" min="0" step="any" value="1" />
+        </div>
+        <div>
+          <label>恢复单位</label>
+          <select id="restoreUnit">
+            <option value="TB">TB</option>
+            <option value="GB">GB</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label>恢复后临时在 Standard 中保留天数</label>
+          <input id="restoreTempDays" type="number" min="0" step="1" value="7" />
+        </div>
+        <div>
+          <label>下载（出站）数据量（用于计算 egress）</label>
+          <input id="downloadValue" type="number" min="0" step="any" value="1" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>下载单位</label>
+          <select id="downloadUnit">
+            <option value="TB">TB</option>
+            <option value="GB">GB</option>
+          </select>
+        </div>
+        <div></div>
+      </div>
+
+      <div style="margin-top:12px;">
+        <button id="calc">计算</button>
+        <button id="preset100" class="preset">示例：100 GB</button>
+        <button id="preset1TB" class="preset">示例：1 TB</button>
+        <button id="preset10TB" class="preset">示例：10 TB</button>
+        <button id="exportCsv" class="secondary">导出 CSV</button>
+      </div>
+
+      <h2>逐项费用明细</h2>
+      <table id="resultTable" class="panel">
+        <tbody>
+          <tr><th>项</th><th>费用 (USD)</th></tr>
+        </tbody>
+      </table>
+
+      <div style="margin-top:12px;">
+        <div class="total">总计：<span id="totalCost">0.00</span> USD</div>
+      </div>
+      <footer>
+        <div>注：Deep Archive 最少按 180 天计费（AWS 要求）。请求类按每 1K 次计费，存储按月计费（此处用 30 天/月 换算）。所有数值为估算值，请以 AWS 账单为准。</div>
+      </footer>
+    </div>
+
+    <div class="panel narrow">
+      <h3>默认价格（可编辑）</h3>
+      <div class="price-grid">
+        <div>
+          <label>S3 Standard 存储（USD / TB / 月）</label>
+          <input id="priceStandardStorage" type="number" min="0" step="any" value="23" />
+        </div>
+        <div>
+          <label>出站流量（USD / TB）</label>
+          <input id="priceEgress" type="number" min="0" step="any" value="90" />
+        </div>
+
+        <div>
+          <label>PUT/COPY/POST/LIST（USD / 1K）</label>
+          <input id="pricePut" type="number" min="0" step="any" value="0.005" />
+        </div>
+        <div>
+          <label>Deep Archive 存储（USD / TB / 月）</label>
+          <input id="priceDeepStorage" type="number" min="0" step="any" value="0.99" />
+        </div>
+
+        <div>
+          <label>生命周期转换请求（USD / 1K）</label>
+          <input id="priceLifecycle" type="number" min="0" step="any" value="0.05" />
+        </div>
+        <div>
+          <label>Deep Archive 标准恢复 请求费（USD / 1K）</label>
+          <input id="priceDeepRestoreReqStandard" type="number" min="0" step="any" value="0.10" />
+        </div>
+
+        <div>
+          <label>Deep Archive 标准恢复 检索费（USD / TB）</label>
+          <input id="priceDeepRetrieveStandard" type="number" min="0" step="any" value="20" />
+        </div>
+        <div>
+          <label>Deep Archive 批量恢复 请求费（USD / 1K）</label>
+          <input id="priceDeepRestoreReqBulk" type="number" min="0" step="any" value="0.025" />
+        </div>
+
+        <div>
+          <label>Deep Archive 批量恢复 检索费（USD / TB）</label>
+          <input id="priceDeepRetrieveBulk" type="number" min="0" step="any" value="2.5" />
+        </div>
+        <div></div>
+      </div>
+
+      <div style="margin-top:12px;">
+        <button id="savePrices" class="secondary">保存价格到 localStorage</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // 工具函数
+    function toBytes(value, unit) {
+      if (!value || value <= 0) return 0;
+      if (unit === 'TB') return value * 1e12;
+      if (unit === 'GB') return value * 1e9;
+      return 0;
+    }
+    function formatUSD(x) {
+      return Number(x).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+    }
+
+    // DOM
+    const el = id => document.getElementById(id);
+    function loadPrices() {
+      try {
+        const data = JSON.parse(localStorage.getItem('kopia_s3_prices') || '{}');
+        if (data.priceStandardStorage) el('priceStandardStorage').value = data.priceStandardStorage;
+        if (data.priceEgress) el('priceEgress').value = data.priceEgress;
+        if (data.pricePut) el('pricePut').value = data.pricePut;
+        if (data.priceDeepStorage) el('priceDeepStorage').value = data.priceDeepStorage;
+        if (data.priceLifecycle) el('priceLifecycle').value = data.priceLifecycle;
+        if (data.priceDeepRestoreReqStandard) el('priceDeepRestoreReqStandard').value = data.priceDeepRestoreReqStandard;
+        if (data.priceDeepRetrieveStandard) el('priceDeepRetrieveStandard').value = data.priceDeepRetrieveStandard;
+        if (data.priceDeepRestoreReqBulk) el('priceDeepRestoreReqBulk').value = data.priceDeepRestoreReqBulk;
+        if (data.priceDeepRetrieveBulk) el('priceDeepRetrieveBulk').value = data.priceDeepRetrieveBulk;
+      } catch(e){ /* ignore */ }
+    }
+    function savePrices() {
+      const data = {
+        priceStandardStorage: el('priceStandardStorage').value,
+        priceEgress: el('priceEgress').value,
+        pricePut: el('pricePut').value,
+        priceDeepStorage: el('priceDeepStorage').value,
+        priceLifecycle: el('priceLifecycle').value,
+        priceDeepRestoreReqStandard: el('priceDeepRestoreReqStandard').value,
+        priceDeepRetrieveStandard: el('priceDeepRetrieveStandard').value,
+        priceDeepRestoreReqBulk: el('priceDeepRestoreReqBulk').value,
+        priceDeepRetrieveBulk: el('priceDeepRetrieveBulk').value
+      };
+      localStorage.setItem('kopia_s3_prices', JSON.stringify(data));
+      alert('已保存价格到 localStorage');
+    }
+
+    function calculate() {
+      // 读取输入
+      const totalValue = parseFloat(el('totalValue').value) || 0;
+      const totalUnit = el('totalUnit').value;
+      const chunkSizeMB = parseFloat(el('chunkSizeMB').value) || 25;
+      const chunkBytes = chunkSizeMB * 1e6;
+
+      const lifecycleEnable = el('lifecycleEnable').checked;
+      const lifecycleDaysAfter = Math.max(0, parseInt(el('lifecycleDaysAfter').value)||0);
+      // S3 Standard 在库天数由规则决定： = lifecycleDaysAfter + 1（不可修改）
+      const standardDaysDerived = lifecycleDaysAfter + 1;
+      // 更新 UI 显示并强制禁用该输入以防止编辑
+      const sdEl = el('standardDaysDerived');
+      if (sdEl) { sdEl.value = standardDaysDerived; sdEl.disabled = true; }
+      let deepArchiveDays = Math.max(0, parseInt(el('deepArchiveDays').value)||0);
+
+      const restoreType = el('restoreType').value;
+      const restoreCount = Math.max(0, parseInt(el('restoreCount').value)||0);
+      const restoreValue = parseFloat(el('restoreValue').value) || 0;
+      const restoreUnit = el('restoreUnit').value;
+      const restoreTempDays = Math.max(0, parseInt(el('restoreTempDays').value)||0);
+
+      const downloadValue = parseFloat(el('downloadValue').value) || 0;
+      const downloadUnit = el('downloadUnit').value;
+
+      // 价格
+      const priceStandardStorage = parseFloat(el('priceStandardStorage').value) || 0;
+      const priceEgress = parseFloat(el('priceEgress').value) || 0;
+      const pricePut = parseFloat(el('pricePut').value) || 0;
+      const priceDeepStorage = parseFloat(el('priceDeepStorage').value) || 0;
+      const priceLifecycle = parseFloat(el('priceLifecycle').value) || 0;
+      const priceDeepRestoreReqStandard = parseFloat(el('priceDeepRestoreReqStandard').value) || 0;
+      const priceDeepRetrieveStandard = parseFloat(el('priceDeepRetrieveStandard').value) || 0;
+      const priceDeepRestoreReqBulk = parseFloat(el('priceDeepRestoreReqBulk').value) || 0;
+      const priceDeepRetrieveBulk = parseFloat(el('priceDeepRetrieveBulk').value) || 0;
+
+      // 转换总量为 bytes / TB
+      const totalBytes = toBytes(totalValue, totalUnit);
+      const totalTB = totalBytes / 1e12;
+
+      // 对象数量（分片）
+      const numChunks = totalBytes > 0 ? Math.ceil(totalBytes / chunkBytes) : 0;
+
+      // PUT 请求费用
+      const putCount = numChunks;
+      const putCost = (putCount / 1000) * pricePut;
+
+      // Standard 存储：分转入前（如果启用生命周期转移）
+      // Standard 在库天数 = 转入天数 + 1（不可修改）
+      const standardDaysBeforeTransition = standardDaysDerived;
+      const standardStorageCost = totalTB * priceStandardStorage * (standardDaysBeforeTransition / 30);
+
+      // 生命周期转换请求费用
+      const lifecycleRequestCount = lifecycleEnable ? numChunks : 0;
+      const lifecycleRequestCost = (lifecycleRequestCount / 1000) * priceLifecycle;
+
+      // Deep Archive 存储费用（仅当启用生命周期转移）
+      if (lifecycleEnable) {
+        deepArchiveDays = Math.max(deepArchiveDays, 180); // 强制最少 180 天
+      } else {
+        deepArchiveDays = 0;
+      }
+      const deepArchiveStorageCost = lifecycleEnable ? (totalTB * priceDeepStorage * (deepArchiveDays / 30)) : 0;
+
+      // 恢复计算（按恢复次数累加）
+      const restoreBytes = toBytes(restoreValue, restoreUnit);
+      const restoreObjects = restoreBytes > 0 ? Math.ceil(restoreBytes / chunkBytes) : 0;
+      const perRestoreRequestCount = restoreObjects;
+      let restoreRequestPricePer1k = (restoreType === 'standard') ? priceDeepRestoreReqStandard : priceDeepRestoreReqBulk;
+      let retrievePricePerTB = (restoreType === 'standard') ? priceDeepRetrieveStandard : priceDeepRetrieveBulk;
+
+      const totalRestoreRequestCount = perRestoreRequestCount * restoreCount;
+      const restoreRequestCost = (totalRestoreRequestCount / 1000) * restoreRequestPricePer1k;
+      const retrieveDataTB = restoreBytes / 1e12;
+      const retrievalFee = retrieveDataTB * retrievePricePerTB * restoreCount;
+
+      // 恢复后临时 Standard 存储（恢复的数据在 Standard 中的天数）
+      const tempStorageTB = retrieveDataTB;
+      const tempStorageCost = tempStorageTB * priceStandardStorage * (restoreTempDays / 30) * restoreCount;
+
+      // 出站 (egress) 费用（下载数据）
+      const downloadBytes = toBytes(downloadValue, downloadUnit);
+      const egressTB = downloadBytes / 1e12;
+      const egressCost = egressTB * priceEgress;
+
+      // 汇总（分组：上传相关 与 恢复/出站相关）
+      const parts = [
+        { name: 'PUT 请求费用', value: putCost, detail: `${putCount} 次对象 (每 ${chunkSizeMB} MB)` },
+        { name: `Standard 存储（转入前 ${standardDaysBeforeTransition} 天）`, value: standardStorageCost, detail: `${totalTB} TB` },
+        { name: '生命周期转换请求费用', value: lifecycleRequestCost, detail: `${lifecycleRequestCount} 次` },
+        { name: `Deep Archive 存储（计费 ${deepArchiveDays} 天）`, value: deepArchiveStorageCost, detail: lifecycleEnable ? `${totalTB} TB` : '未启用' },
+        { name: `恢复请求费用 (${restoreType})`, value: restoreRequestCost, detail: `${totalRestoreRequestCount} 次请求` },
+        { name: `数据检索费用 (${restoreType})`, value: retrievalFee, detail: `${retrieveDataTB} TB * ${restoreCount}` },
+        { name: `恢复后临时 Standard 存储`, value: tempStorageCost, detail: `${tempStorageTB} TB * ${restoreCount} 次` },
+        { name: '出站 (egress) 费用', value: egressCost, detail: `${egressTB} TB` }
+      ];
+      // 计算分组小计
+      const uploadSubtotal = (parts[0].value||0) + (parts[1].value||0) + (parts[2].value||0) + (parts[3].value||0);
+      const restoreSubtotal = (parts[4].value||0) + (parts[5].value||0) + (parts[6].value||0) + (parts[7].value||0);
+      const totalCost = uploadSubtotal + restoreSubtotal;
+      
+      // 渲染结果表（含分组小计和总体总计）
+      const tbody = el('resultTable').querySelector('tbody');
+      tbody.innerHTML = '<tr><th>项</th><th>费用 (USD)</th></tr>';
+      // 上传相关项
+      parts.slice(0,4).forEach(p=>{
+        const tr = document.createElement('tr');
+        const td1 = document.createElement('td');
+        td1.innerHTML = `<div>${p.name}</div><div class="muted small">${p.detail}</div>`;
+        const td2 = document.createElement('td');
+        td2.textContent = formatUSD(p.value || 0);
+        tr.appendChild(td1); tr.appendChild(td2);
+        tbody.appendChild(tr);
+      });
+      // 上传小计
+      const trUploadSubtotal = document.createElement('tr');
+      trUploadSubtotal.innerHTML = `<td class="total">上传相关小计</td><td class="total">${formatUSD(uploadSubtotal)}</td>`;
+      tbody.appendChild(trUploadSubtotal);
+
+      // 恢复/出站相关项
+      parts.slice(4).forEach(p=>{
+        const tr = document.createElement('tr');
+        const td1 = document.createElement('td');
+        td1.innerHTML = `<div>${p.name}</div><div class="muted small">${p.detail}</div>`;
+        const td2 = document.createElement('td');
+        td2.textContent = formatUSD(p.value || 0);
+        tr.appendChild(td1); tr.appendChild(td2);
+        tbody.appendChild(tr);
+      });
+      // 恢复小计
+      const trRestoreSubtotal = document.createElement('tr');
+      trRestoreSubtotal.innerHTML = `<td class="total">恢复/出站小计</td><td class="total">${formatUSD(restoreSubtotal)}</td>`;
+      tbody.appendChild(trRestoreSubtotal);
+
+      // 总计
+      const trTotal = document.createElement('tr');
+      trTotal.innerHTML = `<td class="total">总体总计</td><td class="total">${formatUSD(totalCost)}</td>`;
+      tbody.appendChild(trTotal);
+      el('totalCost').textContent = formatUSD(totalCost);
+
+      // 保存最近计算结果方便导出
+      window._lastCalc = { parts, totalCost, meta: {
+        totalValue, totalUnit, totalTB, numChunks, chunkSizeMB,
+        standardDaysDerived, lifecycleEnable, lifecycleDaysAfter, deepArchiveDays,
+        restoreType, restoreCount, restoreValue, restoreUnit, restoreTempDays,
+        downloadValue, downloadUnit
+      }};
+    }
+
+    // 恢复/下载默认行为：默认恢复/下载量跟随总上传量（除非用户手动修改）
+    let restoreTouched = false;
+    let downloadTouched = false;
+    let chunkTouched = false;
+    el('restoreValue').addEventListener('input', ()=> { restoreTouched = true; });
+    el('downloadValue').addEventListener('input', ()=> { downloadTouched = true; });
+    el('chunkSizeMB').addEventListener('input', ()=> { chunkTouched = true; });
+
+    function updateStandardDaysDerived() {
+      const lifecycleDays = Math.max(0, parseInt(el('lifecycleDaysAfter').value) || 0);
+      const derived = lifecycleDays + 1;
+      const sd = el('standardDaysDerived');
+      if (sd) sd.value = derived;
+    }
+
+    function syncDerivedDefaults() {
+      const tv = el('totalValue').value;
+      const tu = el('totalUnit').value;
+      if (!restoreTouched) {
+        el('restoreValue').value = tv || 0;
+        el('restoreUnit').value = tu;
+      }
+      if (!downloadTouched) {
+        el('downloadValue').value = tv || 0;
+        el('downloadUnit').value = tu;
+      }
+      // 同步 Standard 在库天数显示（不可编辑）
+      updateStandardDaysDerived();
+    }
+
+    el('lifecycleDaysAfter').addEventListener('input', updateStandardDaysDerived);
+    el('lifecycleDaysAfter').addEventListener('change', updateStandardDaysDerived);
+    el('lifecycleEnable').addEventListener('change', updateStandardDaysDerived);
+
+    el('totalValue').addEventListener('input', syncDerivedDefaults);
+    el('totalUnit').addEventListener('change', syncDerivedDefaults);
+
+    // Presets
+    el('preset100').addEventListener('click', ()=>{ el('totalValue').value=100; el('totalUnit').value='GB'; syncDerivedDefaults(); });
+    el('preset1TB').addEventListener('click', ()=>{ el('totalValue').value=1; el('totalUnit').value='TB'; syncDerivedDefaults(); });
+    el('preset10TB').addEventListener('click', ()=>{ el('totalValue').value=10; el('totalUnit').value='TB'; syncDerivedDefaults(); });
+
+    el('calc').addEventListener('click', ()=>{ syncDerivedDefaults(); calculate(); });
+    el('savePrices').addEventListener('click', savePrices);
+
+    el('exportCsv').addEventListener('click', ()=>{
+      const data = window._lastCalc;
+      if (!data) { alert('请先点击 计算 按钮以生成结果'); return; }
+      const rows = [['项','金额(USD)','备注']];
+      data.parts.forEach(p=> rows.push([p.name, (p.value||0).toFixed(2), p.detail]));
+      rows.push(['总计', data.totalCost.toFixed(2), '']);
+      const csv = rows.map(r => r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(',')).join('\n');
+      const blob = new Blob([csv], {type:'text/csv;charset=UTF-8;'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'kopia_s3_costs.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+
+    // 初始化
+    loadPrices();
+    syncDerivedDefaults();
+    updateStandardDaysDerived();
+    // 确保 standardDaysDerived 在计算前再次同步并禁用
+    const sde = el('standardDaysDerived'); if (sde) sde.disabled = true;
+    calculate();
+  </script>
+</body>
+</html>
